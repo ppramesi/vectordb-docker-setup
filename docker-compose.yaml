@@ -1,0 +1,31 @@
+version: "3"
+services:
+  db_pgvector:
+    build:
+      context: ./database_pgvector
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_USER: ${POSTGRES_PGVECTOR_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PGVECTOR_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_PGVECTOR_DB}
+    ports:
+      - "${POSTGRES_PGVECTOR_PORT}:${POSTGRES_PORT}"
+    volumes:
+      - db-data-pgvector:/var/lib/postgresql/data
+
+  db_pgembedding:
+    build:
+      context: ./database_pgembedding
+      dockerfile: Dockerfile
+    environment:
+      POSTGRES_USER: ${POSTGRES_PGEMBEDDING_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PGEMBEDDING_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_PGEMBEDDING_DB}
+    ports:
+      - "${POSTGRES_PGEMBEDDING_PORT}:${POSTGRES_PORT}"
+    volumes:
+      - db-data-pgembedding:/var/lib/postgresql/data
+
+volumes:
+  db-data-pgvector:  # Defined a new volume for db_pgvector
+  db-data-pgembedding:  # Defined a new volume for db_pgembedding
