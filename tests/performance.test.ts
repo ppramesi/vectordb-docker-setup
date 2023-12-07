@@ -4,7 +4,7 @@ import { generateSyntheticData, generateSyntheticDataFast } from "../utils/math"
 
 dotenv.config();
 
-const dimensions = 100;
+const dimensions = 1000;
 const pointNums = 100;
 
 const max = 10;
@@ -176,48 +176,58 @@ beforeAll(async () => {
       chunks.push(synthDataWithCategories.slice(i * 1000, (i + 1) * 1000));
     }
     console.log(`Done generating synthetic data. Time elapsed: ${performance.now() - startTime}ms`);
-    const insertionStartTime = performance.now();
     // we insert the chunks into the database
-    await Promise.all(chunks.map(async (chunk) => {
+    const data: Record<string, Record<string, number[]>> = {
+      pgembedding: {
+        vectors_partitioned: [],
+        vectors_full_index: [],
+        vectors_partial_index: [],
+        vectors_no_index: []
+      },
+      pgvector: {
+        vectors_partitioned: [],
+        vectors_full_index: [],
+        vectors_partial_index: [],
+        vectors_no_index: []
+      }
+    };
+
+    const insertAndMeasure = (knexInstance: KnexT, idxType: string, chunk: any, extType: "pgvector" | "pgembedding") => {
       const innerStartTime = performance.now();
-      const pgeTrx = await pgembeddingKnex.transaction((trx) => {
-        return Promise.all([
-          insertVectors(trx, "vectors_partitioned", chunk, "pgembedding").then(() => {
-            console.log(`pgembedding vectors_partitioned inserted: ${performance.now() - innerStartTime}ms`)
-          }),
-          insertVectors(trx, "vectors_full_index", chunk, "pgembedding").then(() => {
-            console.log(`pgembedding vectors_full_index inserted: ${performance.now() - innerStartTime}ms`)
-          }),
-          insertVectors(trx, "vectors_partial_index", chunk, "pgembedding").then(() => {
-            console.log(`pgembedding vectors_partial_index inserted: ${performance.now() - innerStartTime}ms`)
-          }),
-          insertVectors(trx, "vectors_no_index", chunk, "pgembedding").then(() => {
-            console.log(`pgembedding vectors_no_index inserted: ${performance.now() - innerStartTime}ms`)
-          }),
-        ]);
-      });
-      const pgvTrx = await pgvectorKnex.transaction((trx) => {
-        return Promise.all([
-          insertVectors(trx, "vectors_partitioned", chunk, "pgvector").then(() => {
-            console.log(`pgvector vectors_partitioned inserted: ${performance.now() - innerStartTime}ms`)
-          }),
-          insertVectors(trx, "vectors_full_index", chunk, "pgvector").then(() => {
-            console.log(`pgvector vectors_full_index inserted: ${performance.now() - innerStartTime}ms`)
-          }),
-          insertVectors(trx, "vectors_partial_index", chunk, "pgvector").then(() => {
-            console.log(`pgvector vectors_partial_index inserted: ${performance.now() - innerStartTime}ms`)
-          }),
-          insertVectors(trx, "vectors_no_index", chunk, "pgvector").then(() => {
-            console.log(`pgvector vectors_no_index inserted: ${performance.now() - innerStartTime}ms`)
-          })
-        ])
-      });
-      return Promise.all([
-        pgeTrx,
-        pgvTrx
-      ])
-    }));
-    console.log(`Done inserting chunks. Insertion time: ${i + 1}/${max}: ${performance.now() - insertionStartTime}ms, total time: ${performance.now() - startTime}ms`)
+      return insertVectors(knexInstance, idxType, chunk, extType).then(() => {
+        const finishedTime = performance.now() - innerStartTime;
+        data[extType][idxType].push(finishedTime);
+      })
+    }
+
+    for(const chunk of chunks){
+      await insertAndMeasure(pgembeddingKnex, "vectors_no_index", chunk, "pgembedding");
+      await insertAndMeasure(pgembeddingKnex, "vectors_partitioned", chunk, "pgembedding");
+      await insertAndMeasure(pgembeddingKnex, "vectors_full_index", chunk, "pgembedding");
+      await insertAndMeasure(pgembeddingKnex, "vectors_partial_index", chunk, "pgembedding");
+
+      await insertAndMeasure(pgvectorKnex, "vectors_no_index", chunk, "pgvector");
+      await insertAndMeasure(pgvectorKnex, "vectors_partitioned", chunk, "pgvector");
+      await insertAndMeasure(pgvectorKnex, "vectors_full_index", chunk, "pgvector");
+      await insertAndMeasure(pgvectorKnex, "vectors_partial_index", chunk, "pgvector");
+    }
+
+    // create new object that unroll data object and average the arrays
+    const averagedData: Record<string, Record<string, number>> = {
+      pgembedding: {
+        vectors_partitioned: data.pgembedding.vectors_partitioned.reduce((a, b) => a + b, 0) / data.pgembedding.vectors_partitioned.length,
+        vectors_full_index: data.pgembedding.vectors_full_index.reduce((a, b) => a + b, 0) / data.pgembedding.vectors_full_index.length,
+        vectors_partial_index: data.pgembedding.vectors_partial_index.reduce((a, b) => a + b, 0) / data.pgembedding.vectors_partial_index.length,
+        vectors_no_index: data.pgembedding.vectors_no_index.reduce((a, b) => a + b, 0) / data.pgembedding.vectors_no_index.length
+      },
+      pgvector: {
+        vectors_partitioned: data.pgvector.vectors_partitioned.reduce((a, b) => a + b, 0) / data.pgvector.vectors_partitioned.length,
+        vectors_full_index: data.pgvector.vectors_full_index.reduce((a, b) => a + b, 0) / data.pgvector.vectors_full_index.length,
+        vectors_partial_index: data.pgvector.vectors_partial_index.reduce((a, b) => a + b, 0) / data.pgvector.vectors_partial_index.length,
+        vectors_no_index: data.pgvector.vectors_no_index.reduce((a, b) => a + b, 0) / data.pgvector.vectors_no_index.length
+      }
+    }
+    console.table(averagedData);
   }
 })
 
@@ -275,14 +285,130 @@ async function executeSelectNoWhere(knex: KnexT, tableName: string, queryVector:
   return result;
 }
 
-afterAll(async () => {
-  // console.log("Dropping tables")
-  // await Promise.all([
-  //   down(pgvectorKnex),
-  //   down(pgembeddingKnex)
-  // ])
-  // console.log("Done dropping tables")
+const warmupIterations = 50;
 
+test("Main test", async () => {
+  const results = {
+    pgvector: {
+      vectors_partitioned: [],
+      vectors_full_index: [],
+      vectors_partial_index: [],
+      vectors_no_index: []
+    },
+    pgembedding: {
+      vectors_partitioned: [],
+      vectors_full_index: [],
+      vectors_partial_index: [],
+      vectors_no_index: []
+    }
+  };
+  const resultsNowhere = {
+    pgvector: {
+      vectors_partitioned: [],
+      vectors_full_index: [],
+      vectors_partial_index: [],
+      vectors_no_index: []
+    },
+    pgembedding: {
+      vectors_partitioned: [],
+      vectors_full_index: [],
+      vectors_partial_index: [],
+      vectors_no_index: []
+    }
+  };
+  const doStuffNowhere = async (pgInstance: KnexT, idxType: string, extType: "pgvector" | "pgembedding") => {
+    const startTime = performance.now();
+    console.log("doing stuff nowhere, warming up...");
+    for (let i = 0; i < warmupIterations; i++) {
+      const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+      await executeSelectNoWhere(pgInstance, idxType, queryVector, extType, false);
+    }
+    console.log("done warming up, actually running now...");
+  
+    for(let i = 0; i < 100; i++){
+      const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+      const startTime = performance.now();
+      await executeSelectNoWhere(pgInstance, idxType, queryVector, extType, false);
+      const elapsedTime = performance.now() - startTime;
+      resultsNowhere[extType][idxType].push(elapsedTime);
+    }
+    console.log(`done running, elapsed time: ${performance.now() - startTime}ms`);
+  }
+  const doStuff = async (pgInstance: KnexT, idxType: string, extType: "pgvector" | "pgembedding") => {
+    const startTime = performance.now();
+    console.log("doing stuff, warming up...");
+    for (let i = 0; i < warmupIterations; i++) {
+      const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+      const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+      await executeSelect(pgInstance, idxType, queryVector, randomLetter, extType, false);
+    }
+    console.log("done warming up, actually running now...");
+  
+    for(let i = 0; i < 100; i++){
+      const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+      const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+      const startTime = performance.now();
+      await executeSelect(pgInstance, idxType, queryVector, randomLetter, extType, false);
+      const elapsedTime = performance.now() - startTime;
+      results[extType][idxType].push(elapsedTime);
+    }
+    console.log(`done running, elapsed time: ${performance.now() - startTime}ms`);
+  }
+
+  await doStuff(pgvectorKnex, "vectors_partitioned", "pgvector");
+  await doStuff(pgvectorKnex, "vectors_full_index", "pgvector");
+  await doStuff(pgvectorKnex, "vectors_partial_index", "pgvector");
+  await doStuff(pgvectorKnex, "vectors_no_index", "pgvector");
+
+  await doStuff(pgembeddingKnex, "vectors_partitioned", "pgembedding");
+  await doStuff(pgembeddingKnex, "vectors_full_index", "pgembedding");
+  await doStuff(pgembeddingKnex, "vectors_partial_index", "pgembedding");
+  await doStuff(pgembeddingKnex, "vectors_no_index", "pgembedding");
+
+  await doStuffNowhere(pgvectorKnex, "vectors_partitioned", "pgvector");
+  await doStuffNowhere(pgvectorKnex, "vectors_full_index", "pgvector");
+  await doStuffNowhere(pgvectorKnex, "vectors_partial_index", "pgvector");
+  await doStuffNowhere(pgvectorKnex, "vectors_no_index", "pgvector");
+
+  await doStuffNowhere(pgembeddingKnex, "vectors_partitioned", "pgembedding");
+  await doStuffNowhere(pgembeddingKnex, "vectors_full_index", "pgembedding");
+  await doStuffNowhere(pgembeddingKnex, "vectors_partial_index", "pgembedding");
+  await doStuffNowhere(pgembeddingKnex, "vectors_no_index", "pgembedding");
+
+  // average the results
+  const averagedResults = {
+    pgvector: {
+      vectors_partitioned: results.pgvector.vectors_partitioned.reduce((a, b) => a + b, 0) / results.pgvector.vectors_partitioned.length,
+      vectors_full_index: results.pgvector.vectors_full_index.reduce((a, b) => a + b, 0) / results.pgvector.vectors_full_index.length,
+      vectors_partial_index: results.pgvector.vectors_partial_index.reduce((a, b) => a + b, 0) / results.pgvector.vectors_partial_index.length,
+      vectors_no_index: results.pgvector.vectors_no_index.reduce((a, b) => a + b, 0) / results.pgvector.vectors_no_index.length
+    },
+    pgembedding: {
+      vectors_partitioned: results.pgembedding.vectors_partitioned.reduce((a, b) => a + b, 0) / results.pgembedding.vectors_partitioned.length,
+      vectors_full_index: results.pgembedding.vectors_full_index.reduce((a, b) => a + b, 0) / results.pgembedding.vectors_full_index.length,
+      vectors_partial_index: results.pgembedding.vectors_partial_index.reduce((a, b) => a + b, 0) / results.pgembedding.vectors_partial_index.length,
+      vectors_no_index: results.pgembedding.vectors_no_index.reduce((a, b) => a + b, 0) / results.pgembedding.vectors_no_index.length
+    }
+  }
+  const averagedResultsNowhere = {
+    pgvector: {
+      vectors_partitioned: resultsNowhere.pgvector.vectors_partitioned.reduce((a, b) => a + b, 0) / resultsNowhere.pgvector.vectors_partitioned.length,
+      vectors_full_index: resultsNowhere.pgvector.vectors_full_index.reduce((a, b) => a + b, 0) / resultsNowhere.pgvector.vectors_full_index.length,
+      vectors_partial_index: resultsNowhere.pgvector.vectors_partial_index.reduce((a, b) => a + b, 0) / resultsNowhere.pgvector.vectors_partial_index.length,
+      vectors_no_index: resultsNowhere.pgvector.vectors_no_index.reduce((a, b) => a + b, 0) / resultsNowhere.pgvector.vectors_no_index.length
+    },
+    pgembedding: {
+      vectors_partitioned: resultsNowhere.pgembedding.vectors_partitioned.reduce((a, b) => a + b, 0) / resultsNowhere.pgembedding.vectors_partitioned.length,
+      vectors_full_index: resultsNowhere.pgembedding.vectors_full_index.reduce((a, b) => a + b, 0) / resultsNowhere.pgembedding.vectors_full_index.length,
+      vectors_partial_index: resultsNowhere.pgembedding.vectors_partial_index.reduce((a, b) => a + b, 0) / resultsNowhere.pgembedding.vectors_partial_index.length,
+      vectors_no_index: resultsNowhere.pgembedding.vectors_no_index.reduce((a, b) => a + b, 0) / resultsNowhere.pgembedding.vectors_no_index.length
+    }
+  }
+  console.table(averagedResults);
+  console.table(averagedResultsNowhere);
+});
+
+afterAll(async () => {
   console.log("Destroying knex connections")
   await Promise.all([
     pgvectorKnex.destroy(),
@@ -291,141 +417,139 @@ afterAll(async () => {
   console.log("Done destroying knex connections")
 })
 
-test("", async () => {
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  const pgvResult = await executeSelect(pgvectorKnex, "vectors_full_index", queryVector, randomLetter, "pgvector", true);
-  const pgeResult = await executeSelect(pgembeddingKnex, "vectors_full_index", queryVector, randomLetter, "pgembedding", true);
+// test("", async () => {
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   const pgvResult = await executeSelect(pgvectorKnex, "vectors_full_index", queryVector, randomLetter, "pgvector", true);
+//   const pgeResult = await executeSelect(pgembeddingKnex, "vectors_full_index", queryVector, randomLetter, "pgembedding", true);
 
-  console.log({pgvResult, pgeResult});
-})
+//   console.log({pgvResult, pgeResult});
+// })
 
-const warmupIterations = 50;
+// test("Can we actually get data from pgvectors?", async () => {
+//   const result = await pgvectorKnex.raw(`SELECT * FROM vectors_no_index LIMIT 10`);
+//   expect(result.rows.length).toBeGreaterThan(0);
+// })
+// test("Can we actually get data from pgembedding?", async () => {
+//   const result = await pgembeddingKnex.raw(`SELECT * FROM vectors_no_index LIMIT 10`);
+//   expect(result.rows.length).toBeGreaterThan(0);
+// })
 
-test("Can we actually get data from pgvectors?", async () => {
-  const result = await pgvectorKnex.raw(`SELECT * FROM vectors_no_index LIMIT 10`);
-  expect(result.rows.length).toBeGreaterThan(0);
-})
-test("Can we actually get data from pgembedding?", async () => {
-  const result = await pgembeddingKnex.raw(`SELECT * FROM vectors_no_index LIMIT 10`);
-  expect(result.rows.length).toBeGreaterThan(0);
-})
+// test("Checking indexes pgvector", async () => {
+//   const result = await pgvectorKnex.raw(`SELECT * FROM pg_indexes WHERE tablename = 'vectors_full_index'`);
+//   console.log(result.rows);
+// })
+// test("Checking indexes pgembedding", async () => {
+//   const result = await pgembeddingKnex.raw(`SELECT * FROM pg_indexes WHERE tablename = 'vectors_full_index'`);
+//   console.log(result.rows);
+// })
 
-test("Checking indexes pgvector", async () => {
-  const result = await pgvectorKnex.raw(`SELECT * FROM pg_indexes WHERE tablename = 'vectors_full_index'`);
-  console.log(result.rows);
-})
-test("Checking indexes pgembedding", async () => {
-  const result = await pgembeddingKnex.raw(`SELECT * FROM pg_indexes WHERE tablename = 'vectors_full_index'`);
-  console.log(result.rows);
-})
+// test("Performance tests pgvector partitioned", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgvectorKnex, "vectors_partitioned", queryVector, randomLetter, "pgvector", false);
+//   }
 
-test("Performance tests pgvector partitioned", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgvectorKnex, "vectors_partitioned", queryVector, randomLetter, "pgvector", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgvectorKnex, "vectors_partitioned", queryVector, randomLetter, "pgvector", true);
+// })
+// test("Performance tests pgvector partial index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgvectorKnex, "vectors_partial_index", queryVector, randomLetter, "pgvector", false);
+//   }
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgvectorKnex, "vectors_partitioned", queryVector, randomLetter, "pgvector", true);
-})
-test("Performance tests pgvector partial index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgvectorKnex, "vectors_partial_index", queryVector, randomLetter, "pgvector", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgvectorKnex, "vectors_partial_index", queryVector, randomLetter, "pgvector", true);
+// })
+// test("Performance tests pgvector full index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgvectorKnex, "vectors_full_index", queryVector, randomLetter, "pgvector", false);
+//   }
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgvectorKnex, "vectors_partial_index", queryVector, randomLetter, "pgvector", true);
-})
-test("Performance tests pgvector full index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgvectorKnex, "vectors_full_index", queryVector, randomLetter, "pgvector", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgvectorKnex, "vectors_full_index", queryVector, randomLetter, "pgvector", true);
+// })
+// test("Performance tests pgvector no index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgvectorKnex, "vectors_no_index", queryVector, randomLetter, "pgvector", false);
+//   }
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgvectorKnex, "vectors_full_index", queryVector, randomLetter, "pgvector", true);
-})
-test("Performance tests pgvector no index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgvectorKnex, "vectors_no_index", queryVector, randomLetter, "pgvector", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgvectorKnex, "vectors_no_index", queryVector, randomLetter, "pgvector", true);
+// })
+// test("Performance tests pgvector no where full index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyzeNoWhere(pgvectorKnex, "vectors_full_index", queryVector, "pgvector", false);
+//   }
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgvectorKnex, "vectors_no_index", queryVector, randomLetter, "pgvector", true);
-})
-test("Performance tests pgvector no where full index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyzeNoWhere(pgvectorKnex, "vectors_full_index", queryVector, "pgvector", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyzeNoWhere(pgvectorKnex, "vectors_full_index", queryVector, "pgvector", true);
+// })
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyzeNoWhere(pgvectorKnex, "vectors_full_index", queryVector, "pgvector", true);
-})
+// test("Performance tests pgembedding partitioned", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgembeddingKnex, "vectors_partitioned", queryVector, randomLetter, "pgembedding", false);
+//   }
 
-test("Performance tests pgembedding partitioned", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgembeddingKnex, "vectors_partitioned", queryVector, randomLetter, "pgembedding", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgembeddingKnex, "vectors_partitioned", queryVector, randomLetter, "pgembedding", true);
+// })
+// test("Performance tests pgembedding partial index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgembeddingKnex, "vectors_partial_index", queryVector, randomLetter, "pgembedding", false);
+//   }
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgembeddingKnex, "vectors_partitioned", queryVector, randomLetter, "pgembedding", true);
-})
-test("Performance tests pgembedding partial index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgembeddingKnex, "vectors_partial_index", queryVector, randomLetter, "pgembedding", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgembeddingKnex, "vectors_partial_index", queryVector, randomLetter, "pgembedding", true);
+// })
+// test("Performance tests pgembedding full index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgembeddingKnex, "vectors_full_index", queryVector, randomLetter, "pgembedding", false);
+//   }
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgembeddingKnex, "vectors_partial_index", queryVector, randomLetter, "pgembedding", true);
-})
-test("Performance tests pgembedding full index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgembeddingKnex, "vectors_full_index", queryVector, randomLetter, "pgembedding", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgembeddingKnex, "vectors_full_index", queryVector, randomLetter, "pgembedding", true);
+// })
+// test("Performance tests pgembedding no index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//     await executeExplainAnalyze(pgembeddingKnex, "vectors_no_index", queryVector, randomLetter, "pgembedding", false);
+//   }
 
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgembeddingKnex, "vectors_full_index", queryVector, randomLetter, "pgembedding", true);
-})
-test("Performance tests pgembedding no index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-    await executeExplainAnalyze(pgembeddingKnex, "vectors_no_index", queryVector, randomLetter, "pgembedding", false);
-  }
-
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  const randomLetter = letters[Math.floor(Math.random() * letters.length)];
-  await executeExplainAnalyze(pgembeddingKnex, "vectors_no_index", queryVector, randomLetter, "pgembedding", true);
-})
-test("Performance tests pgembedding no where full index", async () => {
-  for (let i = 0; i < warmupIterations; i++) {
-    const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-    await executeExplainAnalyzeNoWhere(pgembeddingKnex, "vectors_full_index", queryVector, "pgembedding", false);
-  }
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   const randomLetter = letters[Math.floor(Math.random() * letters.length)];
+//   await executeExplainAnalyze(pgembeddingKnex, "vectors_no_index", queryVector, randomLetter, "pgembedding", true);
+// })
+// test("Performance tests pgembedding no where full index", async () => {
+//   for (let i = 0; i < warmupIterations; i++) {
+//     const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//     await executeExplainAnalyzeNoWhere(pgembeddingKnex, "vectors_full_index", queryVector, "pgembedding", false);
+//   }
   
-  const queryVector = generateSyntheticData(1, 1, dimensions)[0];
-  await executeExplainAnalyzeNoWhere(pgembeddingKnex, "vectors_full_index", queryVector, "pgembedding", true);
-})
+//   const queryVector = generateSyntheticData(1, 1, dimensions)[0];
+//   await executeExplainAnalyzeNoWhere(pgembeddingKnex, "vectors_full_index", queryVector, "pgembedding", true);
+// })

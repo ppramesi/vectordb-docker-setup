@@ -26,7 +26,7 @@ ENV LC_ALL en_US.UTF-8
 
 # Install pg_vector
 RUN cd /tmp && \
-    git clone https://github.com/neondatabase/pg_embedding.git && \
+    git clone --branch 0.3.6 https://github.com/neondatabase/pg_embedding.git && \
     cd pg_embedding && \
     make && \
     make install && \

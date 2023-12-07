@@ -23,7 +23,7 @@ ENV LC_ALL en_US.UTF-8
 
 # Install pg_vector
 RUN cd /tmp && \
-    git clone https://github.com/pgvector/pgvector.git && \
+    git clone --branch v0.5.1 https://github.com/pgvector/pgvector.git && \
     cd pgvector && \
     make && \
     make install && \
